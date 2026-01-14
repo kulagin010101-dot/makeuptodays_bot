@@ -92,7 +92,8 @@ def kb_result():
     kb.button(text="📌 Подробнее", callback_data="detail")
     kb.button(text="💾 Сохранить", callback_data="save")
     kb.button(text="💌 Получать советы", callback_data="tips_on")
-    kb.adjust(1, 1, 1)
+    kb.button(text="🔁 Начать сначала", callback_data="restart")
+    kb.adjust(1, 1, 1, 1)
     return kb.as_markup()
 
 
@@ -114,7 +115,6 @@ async def send_daily_tips(bot: Bot, db: DB):
             await bot.send_message(chat_id, tip)
             db.advance_tip_index(chat_id, (idx + 1) % len(DAILY_TIPS))
         except Exception:
-            # если пользователь заблокировал бота или другая ошибка — пропускаем
             continue
 
 
@@ -170,7 +170,7 @@ async def main():
         db.set_tips(message.chat.id, False)
         await message.answer("Готово 🙂 Ежедневные советы отключены. Включить снова можно через «Получать советы».")
 
-    # ===== Quiz start =====
+    # ===== Start quiz =====
 
     @dp.callback_query(F.data == "start_quiz")
     async def start_quiz(cb: CallbackQuery, state: FSMContext):
@@ -178,6 +178,16 @@ async def main():
         await state.clear()
         await state.set_state(Quiz.skin)
         await cb.message.answer("Какая у тебя кожа?", reply_markup=kb_skin())
+        await cb.answer()
+
+    # ===== Restart quiz =====
+
+    @dp.callback_query(F.data == "restart")
+    async def restart_quiz(cb: CallbackQuery, state: FSMContext):
+        db.ensure_user(cb.message.chat.id)
+        await state.clear()
+        await state.set_state(Quiz.skin)
+        await cb.message.answer("Начнём заново 💄\nКакая у тебя кожа?", reply_markup=kb_skin())
         await cb.answer()
 
     @dp.callback_query(F.data.startswith("skin:"))
@@ -223,11 +233,11 @@ async def main():
             occasion=cb.data.split(":")[1],
         )
 
-        # 1) короткая версия сразу
+        # Short text first
         text_short = build_text(answers, level="short")
         await cb.message.answer(text_short, reply_markup=kb_result())
 
-        # 2) сохраняем payload для кнопки "Подробнее"
+        # Save payload for "Подробнее"
         payload = {
             "skin": answers.skin,
             "tone": answers.tone,
@@ -259,6 +269,7 @@ async def main():
             eyes=data["eyes"],
             occasion=data["occasion"],
         )
+
         text_full = build_text(answers, level="full")
         await cb.message.answer(text_full)
         await cb.answer()
