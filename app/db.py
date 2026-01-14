@@ -10,7 +10,8 @@ class DB:
 
     def init(self) -> None:
         cur = self.conn.cursor()
-        # Создаём таблицу (с новой колонкой last_answers)
+
+        # Создаём таблицу (с колонкой last_answers)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -61,11 +62,12 @@ class DB:
     def advance_tip_index(self, chat_id: int, new_index: int) -> None:
         cur = self.conn.cursor()
         cur.execute(
-            "UPDATE users SET tips_index=? WHERE chat_id=?;", (new_index, chat_id)
+            "UPDATE users SET tips_index=? WHERE chat_id=?;",
+            (new_index, chat_id),
         )
         self.conn.commit()
 
-    # ---------- Save results ----------
+    # ---------- Save result text ----------
     def save_last_result(self, chat_id: int, text: str) -> None:
         cur = self.conn.cursor()
         cur.execute("UPDATE users SET last_result=? WHERE chat_id=?;", (text, chat_id))
@@ -76,9 +78,7 @@ class DB:
         row = cur.execute(
             "SELECT last_result FROM users WHERE chat_id=?;", (chat_id,)
         ).fetchone()
-        if not row:
-            return None
-        return row["last_result"]
+        return row["last_result"] if row else None
 
     # ---------- Save last answers payload (for "Подробнее") ----------
     def save_last_answers(self, chat_id: int, answers_json: str) -> None:
@@ -94,10 +94,7 @@ class DB:
         row = cur.execute(
             "SELECT last_answers FROM users WHERE chat_id=?;", (chat_id,)
         ).fetchone()
-        if not row:
-            return None
-        return row["last_answers"]
+        return row["last_answers"] if row else None
 
     def close(self) -> None:
-        self.conn.clos
-::contentReference[oaicite:0]{index=0}
+        self.conn.close()
