@@ -10,6 +10,9 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
 
+from aiogram.dispatcher.middlewares.base import BaseMiddleware
+from aiogram.dispatcher.event.bases import CancelHandler
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -17,6 +20,83 @@ from .config import get_settings
 from .db import DB
 from .logic import Answers, build_text
 from .content import DAILY_TIPS
+
+
+# ================== SUBSCRIPTION GATE ==================
+CHANNEL_USERNAME = "@makeupsekrets"
+CHANNEL_URL = "https://t.me/makeupsekrets"
+
+
+async def is_subscribed(bot: Bot, user_id: int) -> bool:
+    """
+    Проверка подписки на канал.
+    ВАЖНО: чтобы get_chat_member работал стабильно, добавь бота в канал как администратора.
+    """
+    try:
+        member = await bot.get_chat_member(CHANNEL_USERNAME, user_id)
+        return member.status in ("member", "administrator", "creator")
+    except Exception:
+        return False
+
+
+def kb_subscribe():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="👉 Подписаться на канал", url=CHANNEL_URL)
+    kb.button(text="✅ Я подписалась", callback_data="check_sub")
+    kb.adjust(1, 1)
+    return kb.as_markup()
+
+
+SUB_TEXT = (
+    "💄 Бот бесплатный\n\n"
+    "Единственное условие — подписка на наш канал\n"
+    "@makeupsekrets\n\n"
+    "Подписалась? Тогда жми 👇"
+)
+
+
+class SubscriptionMiddleware(BaseMiddleware):
+    """
+    Автопроверка подписки на КАЖДОЕ сообщение/кнопку.
+    Если пользователь не подписан — показываем экран подписки и стопаем дальнейшую обработку.
+    """
+
+    async def __call__(self, handler, event, data):
+        bot: Bot = data["bot"]
+
+        # Определяем user_id для Message или CallbackQuery
+        user_id = None
+        if isinstance(event, Message):
+            user_id = event.from_user.id if event.from_user else None
+        elif isinstance(event, CallbackQuery):
+            user_id = event.from_user.id if event.from_user else None
+
+        if not user_id:
+            return await handler(event, data)
+
+        # Разрешаем /start всегда (чтобы пользователь мог увидеть условия)
+        if isinstance(event, Message) and event.text and event.text.startswith("/start"):
+            return await handler(event, data)
+
+        # Разрешаем кнопку "Я подписалась" всегда (чтобы была возможность пройти проверку)
+        if isinstance(event, CallbackQuery) and event.data == "check_sub":
+            return await handler(event, data)
+
+        # Проверяем подписку
+        if await is_subscribed(bot, user_id):
+            return await handler(event, data)
+
+        # Если не подписан — показываем сообщение и отменяем дальнейшие хендлеры
+        try:
+            if isinstance(event, Message):
+                await event.answer(SUB_TEXT, reply_markup=kb_subscribe())
+            else:
+                # CallbackQuery
+                if event.message:
+                    await event.message.answer(SUB_TEXT, reply_markup=kb_subscribe())
+                await event.answer()
+        finally:
+            raise CancelHandler()
 
 
 # ================= STATES =================
@@ -129,6 +209,11 @@ async def main():
     )
 
     dp = Dispatcher()
+
+    # Подключаем автопроверку подписки (на всё)
+    dp.message.middleware(SubscriptionMiddleware())
+    dp.callback_query.middleware(SubscriptionMiddleware())
+
     db = DB(settings.db_path)
     db.init()
 
@@ -148,12 +233,36 @@ async def main():
     @dp.message(CommandStart())
     async def start_cmd(message: Message):
         db.ensure_user(message.chat.id)
+
+        # /start должен показать условия, если не подписан
+        if not await is_subscribed(bot, message.from_user.id):
+            await message.answer(SUB_TEXT, reply_markup=kb_subscribe())
+            return
+
         await message.answer(
             "Привет 💄\n"
             "Я помогу подобрать макияж, который подойдёт **именно тебе**.\n"
             "Это займёт не больше **2 минут** ✨",
             reply_markup=kb_start()
         )
+
+    @dp.callback_query(F.data == "check_sub")
+    async def check_subscription(cb: CallbackQuery):
+        # после нажатия “Я подписалась” — перепроверяем
+        if await is_subscribed(bot, cb.from_user.id):
+            await cb.message.answer(
+                "✨ Спасибо за подписку!\n"
+                "Теперь бот доступен 💄\n\n"
+                "Нажми «Начать» 👇",
+                reply_markup=kb_start()
+            )
+        else:
+            await cb.message.answer(
+                "Кажется, подписка ещё не оформлена 💕\n"
+                "Подпишись на @makeupsekrets и нажми «Я подписалась» ещё раз.",
+                reply_markup=kb_subscribe()
+            )
+        await cb.answer()
 
     @dp.message(Command("my"))
     async def my_cmd(message: Message):
@@ -233,11 +342,9 @@ async def main():
             occasion=cb.data.split(":")[1],
         )
 
-        # Short text first
         text_short = build_text(answers, level="short")
         await cb.message.answer(text_short, reply_markup=kb_result())
 
-        # Save payload for "Подробнее"
         payload = {
             "skin": answers.skin,
             "tone": answers.tone,
