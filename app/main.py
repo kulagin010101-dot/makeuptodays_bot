@@ -1,4 +1,5 @@
 import asyncio
+import json
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
@@ -14,7 +15,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from .config import get_settings
 from .db import DB
-from .logic import Answers, build_final_text
+from .logic import Answers, build_text
 from .content import DAILY_TIPS
 
 
@@ -88,9 +89,10 @@ def kb_occasion():
 
 def kb_result():
     kb = InlineKeyboardBuilder()
+    kb.button(text="📌 Подробнее", callback_data="detail")
     kb.button(text="💾 Сохранить", callback_data="save")
     kb.button(text="💌 Получать советы", callback_data="tips_on")
-    kb.adjust(1)
+    kb.adjust(1, 1, 1)
     return kb.as_markup()
 
 
@@ -112,6 +114,7 @@ async def send_daily_tips(bot: Bot, db: DB):
             await bot.send_message(chat_id, tip)
             db.advance_tip_index(chat_id, (idx + 1) % len(DAILY_TIPS))
         except Exception:
+            # если пользователь заблокировал бота или другая ошибка — пропускаем
             continue
 
 
@@ -133,10 +136,7 @@ async def main():
     scheduler = AsyncIOScheduler(timezone=ZoneInfo(settings.tz))
     scheduler.add_job(
         send_daily_tips,
-        trigger=CronTrigger(
-            hour=settings.daily_hour,
-            minute=settings.daily_minute
-        ),
+        trigger=CronTrigger(hour=settings.daily_hour, minute=settings.daily_minute),
         args=[bot, db],
         id="daily_tips",
         replace_existing=True
@@ -168,10 +168,13 @@ async def main():
     async def stop_cmd(message: Message):
         db.ensure_user(message.chat.id)
         db.set_tips(message.chat.id, False)
-        await message.answer("Готово 🙂 Ежедневные советы отключены.")
+        await message.answer("Готово 🙂 Ежедневные советы отключены. Включить снова можно через «Получать советы».")
+
+    # ===== Quiz start =====
 
     @dp.callback_query(F.data == "start_quiz")
     async def start_quiz(cb: CallbackQuery, state: FSMContext):
+        db.ensure_user(cb.message.chat.id)
         await state.clear()
         await state.set_state(Quiz.skin)
         await cb.message.answer("Какая у тебя кожа?", reply_markup=kb_skin())
@@ -205,8 +208,11 @@ async def main():
         await cb.message.answer("Для какого случая макияж?", reply_markup=kb_occasion())
         await cb.answer()
 
+    # ===== Final (short) + save answers for Detail =====
+
     @dp.callback_query(F.data.startswith("occ:"))
     async def on_occasion(cb: CallbackQuery, state: FSMContext):
+        db.ensure_user(cb.message.chat.id)
         data = await state.get_data()
 
         answers = Answers(
@@ -214,20 +220,60 @@ async def main():
             tone=data["tone"],
             undertone=data["undertone"],
             eyes=data["eyes"],
-            occasion=cb.data.split(":")[1]
+            occasion=cb.data.split(":")[1],
         )
 
-        text = build_final_text(answers)
-        await cb.message.answer(text, reply_markup=kb_result())
+        # 1) короткая версия сразу
+        text_short = build_text(answers, level="short")
+        await cb.message.answer(text_short, reply_markup=kb_result())
+
+        # 2) сохраняем payload для кнопки "Подробнее"
+        payload = {
+            "skin": answers.skin,
+            "tone": answers.tone,
+            "undertone": answers.undertone,
+            "eyes": answers.eyes,
+            "occasion": answers.occasion,
+        }
+        db.save_last_answers(cb.message.chat.id, json.dumps(payload, ensure_ascii=False))
+
         await state.clear()
         await cb.answer()
 
+    # ===== Detail button =====
+
+    @dp.callback_query(F.data == "detail")
+    async def on_detail(cb: CallbackQuery):
+        db.ensure_user(cb.message.chat.id)
+        raw = db.get_last_answers(cb.message.chat.id)
+        if not raw:
+            await cb.message.answer("Не вижу последнего результата. Нажми /start и пройди подбор 💄")
+            await cb.answer()
+            return
+
+        data = json.loads(raw)
+        answers = Answers(
+            skin=data["skin"],
+            tone=data["tone"],
+            undertone=data["undertone"],
+            eyes=data["eyes"],
+            occasion=data["occasion"],
+        )
+        text_full = build_text(answers, level="full")
+        await cb.message.answer(text_full)
+        await cb.answer()
+
+    # ===== Save =====
+
     @dp.callback_query(F.data == "save")
     async def on_save(cb: CallbackQuery):
+        db.ensure_user(cb.message.chat.id)
         if cb.message.text:
             db.save_last_result(cb.message.chat.id, cb.message.text)
             await cb.message.answer("💾 Сохранила! Напиши /my, чтобы посмотреть позже.")
         await cb.answer()
+
+    # ===== Tips subscription =====
 
     @dp.callback_query(F.data == "tips_on")
     async def tips_on(cb: CallbackQuery):
@@ -240,13 +286,14 @@ async def main():
 
     @dp.callback_query(F.data == "tips_yes")
     async def tips_yes(cb: CallbackQuery):
+        db.ensure_user(cb.message.chat.id)
         db.set_tips(cb.message.chat.id, True)
-        await cb.message.answer("✨ Отлично! Буду присылать советы каждый день.")
+        await cb.message.answer("✨ Отлично! Буду присылать советы каждый день.\nОтключить можно командой /stop.")
         await cb.answer()
 
     @dp.callback_query(F.data == "tips_no")
     async def tips_no(cb: CallbackQuery):
-        await cb.message.answer("Хорошо 🙂 Если захочешь — всегда можно включить позже.")
+        await cb.message.answer("Хорошо 🙂 Если захочешь — включишь позже в любой момент.")
         await cb.answer()
 
     # ================= START =================
